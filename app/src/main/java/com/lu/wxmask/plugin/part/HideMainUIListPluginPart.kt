@@ -18,22 +18,15 @@ import com.lu.wxmask.MainHook
 import com.lu.wxmask.plugin.WXMaskPlugin
 import com.lu.wxmask.util.AppVersionUtil
 import com.lu.wxmask.util.ConfigUtil
-import com.lu.wxmask.util.ext.getViewId  // <-- 就是漏了这一行
+import com.lu.wxmask.util.ext.getViewId // 确保扩展函数正确导入
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
-import java.util.WeakHashMap
 
 /**
- * 主页UI处理：全自动随机智能变脸最终完美版 (已修复延迟闪烁与生命周期失效问题)
+ * 主页UI处理：全自动随机智能变脸（修复分身、无法删除、闪烁问题最终完美版）
  */
 class HideMainUIListPluginPart : IPlugin {
-
-    companion object {
-        // 【核心优化点】使用 WeakHashMap 绑定底层数据对象与真实wxid。
-        // 这样既防止了内存泄漏，又解决了微信异步渲染导致的闪烁，以及Adapter刷新/对象复用导致的失效问题。
-        private val itemDataRealWxidMap = WeakHashMap<Any, String>()
-    }
 
     // ================== 全自动官方号盲盒系统 ==================
     private fun getAutoTarget(realWxid: String): Pair<String, String> {
@@ -54,7 +47,7 @@ class HideMainUIListPluginPart : IPlugin {
         Constrant.WX_CODE_8_0_22 -> "aCW"
         in Constrant.WX_CODE_8_0_22..Constrant.WX_CODE_8_0_43 -> "k" 
         Constrant.WX_CODE_PLAY_8_0_48 -> "l"
-        Constrant.WX_CODE_8_0_49, Constrant.WX_CODE_8_0_51,  Constrant.WX_CODE_8_0_56 -> "l"
+        Constrant.WX_CODE_8_0_49, Constrant.WX_CODE_8_0_51, Constrant.WX_CODE_8_0_56 -> "l"
         Constrant.WX_CODE_8_0_50 -> "n"
         Constrant.WX_CODE_8_0_53 -> "m"
         else -> "m"
@@ -89,25 +82,31 @@ class HideMainUIListPluginPart : IPlugin {
                     val itemData = listView.getItemAtPosition(position) ?: return
                     
                     if (!itemData::class.java.name.contains("storage") && !itemData::class.java.name.contains("Conversation")) return
-                    
-                    // 【核心优化点】直接从 WeakHashMap 获取真实 wxid。哪怕 field_username 被替换成了伪装ID，这里也能找回真实身份
-                    val realWxid = itemDataRealWxidMap[itemData] ?: return
+                    val chatUser = XposedHelpers2.getObjectField<Any>(itemData, "field_username") as? String ?: return
 
-                    // 点击瞬间，将真实 wxid 塞回数据对象，骗过微信内部的跳转逻辑
-                    XposedHelpers2.setObjectField(itemData, "field_username", realWxid)
-                    param.setObjectExtra("restored_wxid", realWxid)
+                    if (WXMaskPlugin.containChatUser(chatUser)) {
+                        val option = ConfigUtil.getOptionData()
+                        if (option.enableMapConversation) {
+                            val maskBean = WXMaskPlugin.getMaskBeamById(chatUser)
+                            if (maskBean != null) {
+                                // 点击瞬间：把真实微信ID存起来，换成盲盒ID骗微信跳转
+                                param.setObjectExtra("real_wxid", chatUser)
+                                val targetId = if (maskBean.mapId.isNullOrBlank()) getAutoTarget(chatUser).first else maskBean.mapId
+                                XposedHelpers2.setObjectField(itemData, "field_username", targetId)
+                            }
+                        }
+                    }
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    val realWxid = param.getObjectExtra("restored_wxid") as? String ?: return
-                    val listView = param.thisObject as android.widget.AdapterView<*>
-                    val position = param.args[1] as Int
-                    val itemData = listView.getItemAtPosition(position) ?: return
-                    
-                    // 跳转逻辑执行完后，立即把 ID 变回伪装 ID，保证退回主界面时 UI 不穿帮
-                    val maskBean = WXMaskPlugin.getMaskBeamById(realWxid)
-                    val targetId = if (maskBean?.mapId.isNullOrBlank()) getAutoTarget(realWxid).first else maskBean!!.mapId
-                    XposedHelpers2.setObjectField(itemData, "field_username", targetId)
+                    val realWxid = param.getObjectExtra("real_wxid") as? String
+                    if (realWxid != null) {
+                        val listView = param.thisObject as android.widget.AdapterView<*>
+                        val position = param.args[1] as Int
+                        val itemData = listView.getItemAtPosition(position) ?: return
+                        // 跳转动作完成后：立即把ID换回真实的，保证数据层干净
+                        XposedHelpers2.setObjectField(itemData, "field_username", realWxid)
+                    }
                 }
             }
         )
@@ -208,38 +207,13 @@ class HideMainUIListPluginPart : IPlugin {
             object : XC_MethodHook2() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val itemData: Any = param.result ?: return
-                    val currentUsername = XposedHelpers2.getObjectField(itemData, "field_username") as? String ?: return
-                    var realWxid = currentUsername
+                    val chatUser: String? = XposedHelpers2.getObjectField(itemData, "field_username") as? String
+                    if (chatUser == null) return
 
-                    // 【核心优化点】处理对象复用与数据重载
-                    if (itemDataRealWxidMap.containsKey(itemData)) {
-                        val mappedWxid = itemDataRealWxidMap[itemData]!!
-                        val maskBean = WXMaskPlugin.getMaskBeamById(mappedWxid)
-                        val targetId = if (maskBean?.mapId.isNullOrBlank()) getAutoTarget(mappedWxid).first else maskBean!!.mapId
-                        
-                        if (currentUsername == targetId) {
-                            // 依然是我们的伪装对象
-                            realWxid = mappedWxid
-                        } else if (currentUsername != mappedWxid) {
-                            // 微信底层的 WCDB 将此数据对象回收利用分配给了别人，清除旧缓存！
-                            itemDataRealWxidMap.remove(itemData)
-                        }
-                    }
-
-                    if (WXMaskPlugin.containChatUser(realWxid)) {
+                    if (WXMaskPlugin.containChatUser(chatUser)) {
                         val option = ConfigUtil.getOptionData()
-                        
-                        // 1. 建立弱引用绑定，保存真实身份
-                        itemDataRealWxidMap[itemData] = realWxid
-
-                        // 2. 彻底替换底层数据的 username。这步做完，微信所有的异步渲染都会自动加载官方号头像，无任何延迟闪烁！
-                        if (option.enableMapConversation) {
-                            val maskBean = WXMaskPlugin.getMaskBeamById(realWxid)
-                            val targetId = if (maskBean?.mapId.isNullOrBlank()) getAutoTarget(realWxid).first else maskBean!!.mapId
-                            XposedHelpers2.setObjectField(itemData, "field_username", targetId)
-                        }
-
-                        // 3. 抹除消息痕迹
+                        // 【核心点1】：这里只清空消息预览和红点，绝不修改 field_username！
+                        // 这样保证了这条数据依然属于真实好友，微信无论是更新、排序还是删除，都不会错乱或分身。
                         XposedHelpers2.setObjectField(itemData, "field_content", "")
                         XposedHelpers2.setObjectField(itemData, "field_digest", "")
                         XposedHelpers2.setObjectField(itemData, "field_unReadCount", 0)
@@ -247,7 +221,6 @@ class HideMainUIListPluginPart : IPlugin {
                         XposedHelpers2.setObjectField(itemData, "field_unReadMuteCount", 0)
                         XposedHelpers2.setObjectField(itemData, "field_msgType", "1")
 
-                        // 4. 时空穿梭
                         if (option.enableTravelTime && option.travelTime != 0L) {
                             val cTime = XposedHelpers2.getObjectField<Any>(itemData, "field_conversationTime")
                             if (cTime is Long) {
@@ -283,7 +256,26 @@ class HideMainUIListPluginPart : IPlugin {
         XposedHelpers2.hookMethod(
             getViewMethod,
             object : XC_MethodHook2() {
-                // 不再在 beforeHookedMethod 中修改任何数据！避免与 getItem 打架
+
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val adapter = param.thisObject as ListAdapter
+                    val position = (param.args[0] as? Int?) ?: return
+                    val itemData = adapter.getItem(position) ?: return
+                    val chatUser = XposedHelpers2.getObjectField<Any>(itemData, "field_username") as? String ?: return
+
+                    if (WXMaskPlugin.containChatUser(chatUser)) {
+                        val option = ConfigUtil.getOptionData()
+                        if (option.enableMapConversation) {
+                            val maskBean = WXMaskPlugin.getMaskBeamById(chatUser)
+                            if (maskBean != null) {
+                                // 【核心点2】：UI渲染前一刻，把ID换成盲盒，骗过微信自带的头像加载器
+                                param.setObjectExtra("real_wxid", chatUser)
+                                val targetId = if (maskBean.mapId.isNullOrBlank()) getAutoTarget(chatUser).first else maskBean.mapId
+                                XposedHelpers2.setObjectField(itemData, "field_username", targetId)
+                            }
+                        }
+                    }
+                }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val adapter: ListAdapter = param.thisObject as ListAdapter
@@ -291,11 +283,12 @@ class HideMainUIListPluginPart : IPlugin {
                     val itemData: Any = adapter.getItem(position) ?: return
                     val itemView: View = param.args[1] as? View ?: return
 
-                    // 安全获取真实 wxid
-                    val currentUsername = XposedHelpers2.getObjectField(itemData, "field_username") as? String
-                    val realWxid = itemDataRealWxidMap[itemData] ?: if (WXMaskPlugin.containChatUser(currentUsername ?: "")) currentUsername else null
+                    val realWxid = param.getObjectExtra("real_wxid") as? String
 
                     if (realWxid != null) {
+                        // 【核心点3】：UI渲染完立刻还原真实ID。保证长按删除、后续逻辑获取到的都是真实ID。
+                        XposedHelpers2.setObjectField(itemData, "field_username", realWxid)
+
                         val maskBean = WXMaskPlugin.getMaskBeamById(realWxid)
                         if (maskBean != null) {
                             val nameTvIdName = when (AppVersionUtil.getVersionCode()) {
@@ -322,9 +315,16 @@ class HideMainUIListPluginPart : IPlugin {
                             }
                         }
 
-                        // 强制隐藏红点和预览文字
                         hideUnReadTipView(itemView)
                         hideMsgViewItemText(itemView)
+                        
+                    } else {
+                        // 兼容保险：如果没被拦截，依然做一下UI清理兜底
+                        val chatUser = XposedHelpers2.getObjectField<Any>(itemData, "field_username") as? String ?: return
+                        if (WXMaskPlugin.containChatUser(chatUser)) {
+                            hideUnReadTipView(itemView)
+                            hideMsgViewItemText(itemView)
+                        }
                     }
                 }
             })
