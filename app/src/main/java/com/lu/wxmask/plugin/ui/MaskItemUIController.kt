@@ -58,9 +58,10 @@ internal class MaskItemUIController(private val context: Context, private val ma
     }
 
     // ================== 新增：变脸快捷选择下拉菜单 ==================
-    // 字典映射：左边是显示在菜单里的名字，右边是底层的真实微信号
+    // 字典映射：左边是显示在菜单里的名字，右边是底层的真实微信号或控制指令
     private val officialAccountDict = listOf(
         "🔮 自动盲盒 (全自动智能分配)" to "",
+        "🚫 完全隐藏 (主页不显示，仅红点提示)" to "hide_completely", // 新增的完全隐藏指令
         "📁 文件传输助手" to "filehelper",
         "💰 微信支付" to "wxpayapp",
         "👥 微信团队" to "weixin",
@@ -100,6 +101,12 @@ internal class MaskItemUIController(private val context: Context, private val ma
                         etMapId.setText("")
                         etTagName.setText("")
                         etMapId.visibility = View.GONE
+                    }
+                    "hide_completely" -> {
+                        // 选择了完全隐藏，下发特定指令并隐藏输入框
+                        etMapId.setText("hide_completely")
+                        etTagName.setText("完全隐藏")
+                        etMapId.visibility = View.GONE 
                     }
                     else -> {
                         // 选择了具体的官方号，自动联动填入 ID 和 名字！
