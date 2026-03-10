@@ -29,7 +29,7 @@ import java.lang.reflect.Modifier
 import kotlin.coroutines.Continuation
 
 /**
- * 主页UI处理：最终完美版（修复8.0.69头像与昵称伪装，修复分身bug）
+ * 主页UI处理：动态变脸最终完美版（支持8.0.69头像与昵称伪装，修复分身bug）
  */
 class HideMainUIListPluginPart : IPlugin {
     val GetItemMethodName = when (AppVersionUtil.getVersionCode()) {
@@ -132,7 +132,7 @@ class HideMainUIListPluginPart : IPlugin {
                             if (maskBean != null) {
                                 // 1. 暂存真实ID
                                 param.setObjectExtra("real_wxid", chatUser)
-                                // 2. 临时换上替身ID骗取头像
+                                // 2. 临时换上替身ID，骗微信去加载替身头像
                                 XposedHelpers2.setObjectField(itemData, "field_username", maskBean.mapId)
                             }
                         }
@@ -148,22 +148,24 @@ class HideMainUIListPluginPart : IPlugin {
                     val realWxid = param.getObjectExtra("real_wxid") as? String
 
                     if (realWxid != null) {
-                        // 3. 换回真实ID，彻底杜绝分身！
+                        // 3. 换回真实ID，彻底杜绝列表分身和点击错乱！
                         XposedHelpers2.setObjectField(itemData, "field_username", realWxid)
 
-                        // 4. 【终极变脸核心】修改屏幕上的名字文本
+                        // 4. 【动态获取用户填写的名字】进行界面伪装
                         val maskBean = WXMaskPlugin.getMaskBeamById(realWxid)
                         if (maskBean != null) {
                             val nameTvIdName = when (AppVersionUtil.getVersionCode()) {
-                                Constrant.WX_CODE_8_0_69 -> "kbq" // 适配8.0.69的昵称控件
-                                else -> "kbq" // 兼容处理
+                                Constrant.WX_CODE_8_0_69 -> "kbq" // 你抓到的 8.0.69 昵称控件 ID
+                                else -> "kbq" 
                             }
                             val nameViewId = ResUtil.getViewId(nameTvIdName)
                             if (nameViewId != 0 && nameViewId != View.NO_ID) {
                                 try {
                                     val nameTv: View? = itemView.findViewById(nameViewId)
                                     if (nameTv != null) {
-                                        XposedHelpers2.callMethod<Any?>(nameTv, "setText", maskBean.mapName)
+                                        // 智能判断：如果用户在软件的“备注”框里填了字，就用备注的名字；如果没填，默认显示“文件传输助手”
+                                        val customName = if (maskBean.tagName.isNullOrBlank()) "文件传输助手" else maskBean.tagName
+                                        XposedHelpers2.callMethod<Any?>(nameTv, "setText", customName)
                                     }
                                 } catch (e: Throwable) {
                                     LogUtil.w("修改名字失败", e)
@@ -171,6 +173,7 @@ class HideMainUIListPluginPart : IPlugin {
                             }
                         }
 
+                        // 执行隐藏未读红点和最后一条消息预览的逻辑
                         hideUnReadTipView(itemView, param)
                         hideMsgViewItemText(itemView, param)
                         
@@ -209,7 +212,7 @@ class HideMainUIListPluginPart : IPlugin {
                         in Constrant.WX_CODE_8_0_22..Constrant.WX_CODE_8_0_40 -> "fhs"
                         Constrant.WX_CODE_PLAY_8_0_42 -> "i2_"
                         Constrant.WX_CODE_8_0_41 -> "ht5"
-                        else -> "ht5"
+                        else -> "ht5" // 你抓到的 8.0.69 最后一条消息控件 ID
                     }
                     val lastMsgViewId = ResUtil.getViewId(msgTvIdName)
                     if (lastMsgViewId != 0 && lastMsgViewId != View.NO_ID) {
