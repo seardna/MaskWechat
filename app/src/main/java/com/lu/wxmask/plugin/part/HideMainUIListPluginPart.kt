@@ -282,7 +282,7 @@ class HideMainUIListPluginPart : IPlugin {
             in Constrant.WX_CODE_8_0_43..Constrant.WX_CODE_8_0_47,
             Constrant.WX_CODE_PLAY_8_0_48, Constrant.WX_CODE_8_0_50, Constrant.WX_CODE_8_0_51, Constrant.WX_CODE_8_0_53, Constrant.WX_CODE_8_0_56,-> "com.tencent.mm.ui.i3"
             in Constrant.WX_CODE_8_0_58..Constrant.WX_CODE_8_0_60 -> "com.tencent.mm.ui.k3"
-            Constrant.WX_CODE_8_0_69 -> "o75.v0" // 这里保留了你加入的8.0.69适配
+            Constrant.WX_CODE_8_0_69 -> "o75.v0" // 你加的8.0.69适配
             else -> null
         }
         var getItemMethod = if (adapterClazzName != null) {
@@ -328,7 +328,7 @@ class HideMainUIListPluginPart : IPlugin {
     }
 
     private fun hookListViewGetItem(getItemMethod: Method) {
-        LogUtil.d(">>>>>>>>>>.", getItemMethod)
+        de.robv.android.xposed.XposedBridge.log("【核动力雷达】准备就绪，当前 Hook 方法: $getItemMethod")
 
         XposedHelpers2.hookMethod(
             getItemMethod,
@@ -336,26 +336,29 @@ class HideMainUIListPluginPart : IPlugin {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val itemData: Any = param.result ?: return
                     val chatUser: String? = XposedHelpers2.getObjectField(itemData, "field_username")
-                    if (chatUser == null) {
-                        return
-                    }
+                    if (chatUser == null) return
+
                     if (WXMaskPlugin.containChatUser(chatUser)) {
+                        de.robv.android.xposed.XposedBridge.log("【核动力雷达】命中目标！开始穿透扫描好友: $chatUser")
                         
-                        // 【终极扫描雷达开启！】
-                        // 直接把底层数据里所有的字符串扒光打印出来
-                        val fields = itemData.javaClass.fields + itemData.javaClass.declaredFields
-                        for (field in fields) {
-                            try {
-                                field.isAccessible = true
-                                val value = field.get(itemData)
-                                if (value is String && value.isNotEmpty()) {
-                                    // 用 .w 警告级别打印，保证绝对能在日志里显示出来
-                                    LogUtil.w("【终极雷达】字段名: ${field.name} ---> 里面的值: $value")
-                                }
-                            } catch (e: Exception) { }
+                        // 连带父类一起扫描，找出名字藏在哪个字段里
+                        var currentClass: Class<*>? = itemData.javaClass
+                        while (currentClass != null && currentClass != Any::class.java) {
+                            for (field in currentClass.declaredFields) {
+                                try {
+                                    field.isAccessible = true
+                                    val value = field.get(itemData)
+                                    // 只要是字符串，并且不是空的，全部强制打印到 LSPosed！
+                                    if (value is String && value.isNotBlank()) {
+                                        de.robv.android.xposed.XposedBridge.log("【核动力雷达】发现字符串 -> 字段名: ${field.name} ---> 值: $value")
+                                    }
+                                } catch (e: Exception) { }
+                            }
+                            // 往上找父类
+                            currentClass = currentClass.superclass
                         }
 
-                        // 下面保留清理消息和红点的功能，原先导致分身的代码已被移除
+                        // 保留清理消息的功能
                         val option = ConfigUtil.getOptionData()
                         XposedHelpers2.setObjectField(itemData, "field_content", "")
                         XposedHelpers2.setObjectField(itemData, "field_digest", "")
