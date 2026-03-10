@@ -1,8 +1,10 @@
 package com.lu.wxmask.plugin.part
 
 import android.content.Context
+import android.content.Intent
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AbsListView
 import android.widget.ListAdapter
 import android.widget.ListView
 import android.widget.TextView
@@ -18,17 +20,25 @@ import com.lu.wxmask.MainHook
 import com.lu.wxmask.plugin.WXMaskPlugin
 import com.lu.wxmask.util.AppVersionUtil
 import com.lu.wxmask.util.ConfigUtil
-import com.lu.wxmask.util.ext.getViewId // 确保扩展函数正确导入
+import com.lu.wxmask.util.ext.getViewId
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 
 /**
- * 主页UI处理：全自动随机智能变脸（修复分身、无法删除、闪烁问题最终完美版）
+ * 主页UI处理：彻底解决冷启动失效、点击乱跳，并新增自主选择隐藏聊天栏功能
  */
 class HideMainUIListPluginPart : IPlugin {
 
-    // ================== 全自动官方号盲盒系统 ==================
+    // =========================================================================
+    // 【全新功能配置开关】
+    // 你可以根据需求，将这个变量改为 true，开启“主页完全隐藏模式”。
+    // 开启后：主页聊天栏完全消失，但在主页底部的“微信”Tab依然会有红点提示来信。
+    // (如果你在 App 中有对应的开关配置，可以替换为 option.yourConfigSwitch)
+    // =========================================================================
+    private val completelyHideMainUI = false 
+
+    // 全自动官方号盲盒系统
     private fun getAutoTarget(realWxid: String): Pair<String, String> {
         val officialAccounts = listOf(
             Pair("weixin", "微信团队"),
@@ -41,7 +51,6 @@ class HideMainUIListPluginPart : IPlugin {
         val index = Math.abs(realWxid.hashCode()) % officialAccounts.size
         return officialAccounts[index]
     }
-    // ==============================================================
 
     val GetItemMethodName = when (AppVersionUtil.getVersionCode()) {
         Constrant.WX_CODE_8_0_22 -> "aCW"
@@ -54,62 +63,13 @@ class HideMainUIListPluginPart : IPlugin {
     }
 
     override fun handleHook(context: Context, lpparam: XC_LoadPackage.LoadPackageParam) {
-        runCatching {
-            hookListViewClick()
-        }.onFailure {
-            LogUtil.w("hookListViewClick fail", it)
-        }
-
+        // 由于采用了全新的强力拦截模式，去除了繁杂脆弱的 hookListViewClick，集中在 getView 处理。
         runCatching {
             handleMainUIChattingListView2(context, lpparam)
         }.onFailure {
             LogUtil.w("hide mainUI listview fail, try to old function.")
             handleMainUIChattingListView(context, lpparam)
         }
-    }
-
-    private fun hookListViewClick() {
-        XposedHelpers2.findAndHookMethod(
-            android.widget.AdapterView::class.java,
-            "performItemClick",
-            View::class.java,
-            java.lang.Integer.TYPE,
-            java.lang.Long.TYPE,
-            object : XC_MethodHook2() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val listView = param.thisObject as android.widget.AdapterView<*>
-                    val position = param.args[1] as Int
-                    val itemData = listView.getItemAtPosition(position) ?: return
-                    
-                    if (!itemData::class.java.name.contains("storage") && !itemData::class.java.name.contains("Conversation")) return
-                    val chatUser = XposedHelpers2.getObjectField<Any>(itemData, "field_username") as? String ?: return
-
-                    if (WXMaskPlugin.containChatUser(chatUser)) {
-                        val option = ConfigUtil.getOptionData()
-                        if (option.enableMapConversation) {
-                            val maskBean = WXMaskPlugin.getMaskBeamById(chatUser)
-                            if (maskBean != null) {
-                                // 点击瞬间：把真实微信ID存起来，换成盲盒ID骗微信跳转
-                                param.setObjectExtra("real_wxid", chatUser)
-                                val targetId = if (maskBean.mapId.isNullOrBlank()) getAutoTarget(chatUser).first else maskBean.mapId
-                                XposedHelpers2.setObjectField(itemData, "field_username", targetId)
-                            }
-                        }
-                    }
-                }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val realWxid = param.getObjectExtra("real_wxid") as? String
-                    if (realWxid != null) {
-                        val listView = param.thisObject as android.widget.AdapterView<*>
-                        val position = param.args[1] as Int
-                        val itemData = listView.getItemAtPosition(position) ?: return
-                        // 跳转动作完成后：立即把ID换回真实的，保证数据层干净
-                        XposedHelpers2.setObjectField(itemData, "field_username", realWxid)
-                    }
-                }
-            }
-        )
     }
 
     private fun handleMainUIChattingListView(context: Context, lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -212,8 +172,7 @@ class HideMainUIListPluginPart : IPlugin {
 
                     if (WXMaskPlugin.containChatUser(chatUser)) {
                         val option = ConfigUtil.getOptionData()
-                        // 【核心点1】：这里只清空消息预览和红点，绝不修改 field_username！
-                        // 这样保证了这条数据依然属于真实好友，微信无论是更新、排序还是删除，都不会错乱或分身。
+                        // 净化数据层：彻底抹除预览文字、红点等，但绝不更改底层 ID，保障正常删除！
                         XposedHelpers2.setObjectField(itemData, "field_content", "")
                         XposedHelpers2.setObjectField(itemData, "field_digest", "")
                         XposedHelpers2.setObjectField(itemData, "field_unReadCount", 0)
@@ -268,7 +227,7 @@ class HideMainUIListPluginPart : IPlugin {
                         if (option.enableMapConversation) {
                             val maskBean = WXMaskPlugin.getMaskBeamById(chatUser)
                             if (maskBean != null) {
-                                // 【核心点2】：UI渲染前一刻，把ID换成盲盒，骗过微信自带的头像加载器
+                                // 伪装头像加载器：渲染前瞬移 ID
                                 param.setObjectExtra("real_wxid", chatUser)
                                 val targetId = if (maskBean.mapId.isNullOrBlank()) getAutoTarget(chatUser).first else maskBean.mapId
                                 XposedHelpers2.setObjectField(itemData, "field_username", targetId)
@@ -285,45 +244,85 @@ class HideMainUIListPluginPart : IPlugin {
 
                     val realWxid = param.getObjectExtra("real_wxid") as? String
 
+                    // 【核心复用恢复逻辑】防止开启隐藏模式后，正常的好友也被连带隐藏
+                    val lp = itemView.layoutParams
+                    if (lp != null && lp.height == 1) {
+                        itemView.visibility = View.VISIBLE
+                        lp.height = -2 // WRAP_CONTENT
+                        itemView.layoutParams = lp
+                        itemView.setPadding(0, 0, 0, 0)
+                        itemView.setOnClickListener(null) // 清除残留的拦截器
+                    }
+
                     if (realWxid != null) {
-                        // 【核心点3】：UI渲染完立刻还原真实ID。保证长按删除、后续逻辑获取到的都是真实ID。
+                        // 立刻把底层 ID 还回去，维持原生功能的稳定性（如长按删除）
                         XposedHelpers2.setObjectField(itemData, "field_username", realWxid)
 
-                        val maskBean = WXMaskPlugin.getMaskBeamById(realWxid)
-                        if (maskBean != null) {
-                            val nameTvIdName = when (AppVersionUtil.getVersionCode()) {
-                                Constrant.WX_CODE_8_0_69 -> "kbq" 
-                                else -> "kbq" 
-                            }
-                            val nameViewId = ResUtil.getViewId(nameTvIdName)
-                            if (nameViewId != 0 && nameViewId != View.NO_ID) {
-                                try {
-                                    val nameTv: View? = itemView.findViewById(nameViewId)
-                                    if (nameTv != null) {
-                                        val customName = if (maskBean.tagName.isNullOrBlank() && maskBean.mapId.isNullOrBlank()) {
-                                            getAutoTarget(realWxid).second
-                                        } else if (!maskBean.tagName.isNullOrBlank()) {
-                                            maskBean.tagName
-                                        } else {
-                                            "文件传输助手"
-                                        }
-                                        XposedHelpers2.callMethod<Any?>(nameTv, "setText", customName)
-                                    }
-                                } catch (e: Throwable) {
-                                    LogUtil.w("修改名字失败", e)
-                                }
-                            }
+                        // 【新增功能：彻底隐藏模式】
+                        if (completelyHideMainUI) {
+                            itemView.visibility = View.GONE
+                            val hideParams = itemView.layoutParams ?: AbsListView.LayoutParams(-1, 1)
+                            hideParams.height = 1 // 设置为 1 像素，防止 ListView 崩溃
+                            itemView.layoutParams = hideParams
+                            itemView.setPadding(0, 0, 0, 0)
+                            itemView.setOnClickListener(null)
+                            return // 直接退出，不需要再渲染名字和消息了
                         }
 
-                        hideUnReadTipView(itemView)
-                        hideMsgViewItemText(itemView)
+                        val maskBean = WXMaskPlugin.getMaskBeamById(realWxid)
                         
-                    } else {
-                        // 兼容保险：如果没被拦截，依然做一下UI清理兜底
-                        val chatUser = XposedHelpers2.getObjectField<Any>(itemData, "field_username") as? String ?: return
-                        if (WXMaskPlugin.containChatUser(chatUser)) {
+                        // 【冷启动完美覆盖】将 UI 更新任务丢到主线程队列最末尾，确保覆盖微信自己的异步赋值！
+                        itemView.post {
+                            if (maskBean != null) {
+                                val nameTvIdName = when (AppVersionUtil.getVersionCode()) {
+                                    Constrant.WX_CODE_8_0_69 -> "kbq" 
+                                    else -> "kbq" 
+                                }
+                                val nameViewId = ResUtil.getViewId(nameTvIdName)
+                                if (nameViewId != 0 && nameViewId != View.NO_ID) {
+                                    try {
+                                        val nameTv: View? = itemView.findViewById(nameViewId)
+                                        if (nameTv != null) {
+                                            val customName = if (maskBean.tagName.isNullOrBlank() && maskBean.mapId.isNullOrBlank()) {
+                                                getAutoTarget(realWxid).second
+                                            } else if (!maskBean.tagName.isNullOrBlank()) {
+                                                maskBean.tagName
+                                            } else {
+                                                "文件传输助手"
+                                            }
+                                            XposedHelpers2.callMethod<Any?>(nameTv, "setText", customName)
+                                        }
+                                    } catch (e: Throwable) {
+                                        LogUtil.w("修改名字失败", e)
+                                    }
+                                }
+                            }
                             hideUnReadTipView(itemView)
                             hideMsgViewItemText(itemView)
+                        }
+
+                        // 【完美解决乱跳】覆写原生的单次点击事件，强行跳转到盲盒号，完全不影响长按删除原聊天！
+                        itemView.setOnClickListener {
+                            try {
+                                val targetId = if (maskBean?.mapId.isNullOrBlank()) getAutoTarget(realWxid).first else maskBean!!.mapId
+                                val intent = Intent()
+                                intent.setClassName(itemView.context, "com.tencent.mm.ui.chatting.ChattingUI")
+                                intent.putExtra("Chat_User", targetId)
+                                // 加上强开 Flag，确保必定跳出新的 ChattingUI
+                                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                itemView.context.startActivity(intent)
+                            } catch (e: Throwable) {
+                                LogUtil.w("点击拦截跳转失败", e)
+                            }
+                        }
+                    } else {
+                        val chatUser = XposedHelpers2.getObjectField<Any>(itemData, "field_username") as? String ?: return
+                        if (WXMaskPlugin.containChatUser(chatUser)) {
+                            // 兜底逻辑
+                            itemView.post {
+                                hideUnReadTipView(itemView)
+                                hideMsgViewItemText(itemView)
+                            }
                         }
                     }
                 }
