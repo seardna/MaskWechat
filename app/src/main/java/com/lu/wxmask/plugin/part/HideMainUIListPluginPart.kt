@@ -29,7 +29,7 @@ import java.lang.reflect.Modifier
 import kotlin.coroutines.Continuation
 
 /**
- * 主页UI处理
+ * 主页UI处理：最终完美版（修复8.0.69头像与昵称伪装，修复分身bug）
  */
 class HideMainUIListPluginPart : IPlugin {
     val GetItemMethodName = when (AppVersionUtil.getVersionCode()) {
@@ -96,7 +96,6 @@ class HideMainUIListPluginPart : IPlugin {
     }
 
     private fun hookListViewAdapter(adapterClazz: Class<*>) {
-        // 【关键修复】深度寻找 getView 方法，防止微信把它藏在父类里导致找不到
         var getViewMethod: Method? = null
         var currentClass: Class<*>? = adapterClazz
         while (currentClass != null && currentClass != Any::class.java) {
@@ -111,10 +110,7 @@ class HideMainUIListPluginPart : IPlugin {
             currentClass = currentClass.superclass
         }
 
-        if (getViewMethod == null) {
-            de.robv.android.xposed.XposedBridge.log("【UI雷达】严重错误：在 ${adapterClazz.name} 及其父类中找不到 getView 方法！")
-            return
-        }
+        if (getViewMethod == null) return
 
         val getViewMethodIDText = getViewMethod.toString()
         if (MainHook.uniqueMetaStore.contains(getViewMethodIDText)) return
@@ -122,8 +118,6 @@ class HideMainUIListPluginPart : IPlugin {
         XposedHelpers2.hookMethod(
             getViewMethod,
             object : XC_MethodHook2() {
-
-                var hasPrintedRadar = false
 
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val adapter = param.thisObject as ListAdapter
@@ -136,7 +130,9 @@ class HideMainUIListPluginPart : IPlugin {
                         if (option.enableMapConversation) {
                             val maskBean = WXMaskPlugin.getMaskBeamById(chatUser)
                             if (maskBean != null) {
+                                // 1. 暂存真实ID
                                 param.setObjectExtra("real_wxid", chatUser)
+                                // 2. 临时换上替身ID骗取头像
                                 XposedHelpers2.setObjectField(itemData, "field_username", maskBean.mapId)
                             }
                         }
@@ -148,34 +144,32 @@ class HideMainUIListPluginPart : IPlugin {
                     val position: Int = (param.args[0] as? Int?) ?: return
                     val itemData: Any = adapter.getItem(position) ?: return
                     val itemView: View = param.args[1] as? View ?: return
-                    
-                    // 【全屏无差别UI雷达】
-                    if (!hasPrintedRadar) {
-                        de.robv.android.xposed.XposedBridge.log("【全屏UI雷达】已启动！开始暴力扫描控件...")
-                        ChildDeepCheck().each(itemView) { child ->
-                            try {
-                                val text = XposedHelpers2.callMethod<Any?>(child, "getText")
-                                if (text != null && text.toString().isNotBlank()) {
-                                    val id = child.id
-                                    var idName = "无ID"
-                                    try {
-                                        if (id != View.NO_ID) {
-                                            idName = child.context.resources.getResourceEntryName(id)
-                                        }
-                                    } catch (e: Exception) { }
-                                    
-                                    de.robv.android.xposed.XposedBridge.log("【全屏UI雷达】-> 资源ID名: $idName ---> 文字内容: $text")
-                                }
-                            } catch (e: Throwable) { }
-                        }
-                        hasPrintedRadar = true
-                    }
 
                     val realWxid = param.getObjectExtra("real_wxid") as? String
 
                     if (realWxid != null) {
-                        // 换回真实ID
+                        // 3. 换回真实ID，彻底杜绝分身！
                         XposedHelpers2.setObjectField(itemData, "field_username", realWxid)
+
+                        // 4. 【终极变脸核心】修改屏幕上的名字文本
+                        val maskBean = WXMaskPlugin.getMaskBeamById(realWxid)
+                        if (maskBean != null) {
+                            val nameTvIdName = when (AppVersionUtil.getVersionCode()) {
+                                Constrant.WX_CODE_8_0_69 -> "kbq" // 适配8.0.69的昵称控件
+                                else -> "kbq" // 兼容处理
+                            }
+                            val nameViewId = ResUtil.getViewId(nameTvIdName)
+                            if (nameViewId != 0 && nameViewId != View.NO_ID) {
+                                try {
+                                    val nameTv: View? = itemView.findViewById(nameViewId)
+                                    if (nameTv != null) {
+                                        XposedHelpers2.callMethod<Any?>(nameTv, "setText", maskBean.mapName)
+                                    }
+                                } catch (e: Throwable) {
+                                    LogUtil.w("修改名字失败", e)
+                                }
+                            }
+                        }
 
                         hideUnReadTipView(itemView, param)
                         hideMsgViewItemText(itemView, param)
@@ -282,13 +276,8 @@ class HideMainUIListPluginPart : IPlugin {
             if (getItemMethod != null) {
                 hookListViewGetItem(getItemMethod)
             }
-            
-            // 【史诗级修复】！！！
-            // 之前的代码在这里找到了 o75.v0 就直接 return 退出了！
-            // 导致根本没去执行下面的 hookListViewAdapter，也就没去拦截界面。
-            // 现在强制让它去拦截界面！
+            // 确保UI界面拦截正常生效
             hookListViewAdapter(adapterClazz)
-            
             return
         }
 
