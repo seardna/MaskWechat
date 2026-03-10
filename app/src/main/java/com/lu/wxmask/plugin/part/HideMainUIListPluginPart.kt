@@ -39,6 +39,7 @@ class HideMainUIListPluginPart : IPlugin {
         Constrant.WX_CODE_8_0_49, Constrant.WX_CODE_8_0_51,  Constrant.WX_CODE_8_0_56 -> "l"
         Constrant.WX_CODE_8_0_50 -> "n"
         Constrant.WX_CODE_8_0_53 -> "m"
+        Constrant.WX_CODE_8_0_69 -> "getItem"
         else -> "m"
     }
 
@@ -68,6 +69,7 @@ class HideMainUIListPluginPart : IPlugin {
             in Constrant.WX_CODE_8_0_35..Constrant.WX_CODE_8_0_41 -> "com.tencent.mm.ui.conversation.x" // WX_CODE_PLAY_8_0_42 matches
             Constrant.WX_CODE_8_0_47 -> "com.tencent.mm.ui.conversation.p3"
             Constrant.WX_CODE_8_0_50 -> "com.tencent.mm.ui.conversation.q3"
+            Constrant.WX_CODE_8_0_69 -> "o75.v0"
             else -> null
         }
         var adapterClazz: Class<*>? = null
@@ -278,6 +280,7 @@ class HideMainUIListPluginPart : IPlugin {
             in Constrant.WX_CODE_8_0_43..Constrant.WX_CODE_8_0_47,
             Constrant.WX_CODE_PLAY_8_0_48, Constrant.WX_CODE_8_0_50, Constrant.WX_CODE_8_0_51, Constrant.WX_CODE_8_0_53, Constrant.WX_CODE_8_0_56,-> "com.tencent.mm.ui.i3"
             in Constrant.WX_CODE_8_0_58..Constrant.WX_CODE_8_0_60 -> "com.tencent.mm.ui.k3"
+            Constrant.WX_CODE_8_0_69 -> "o75.v0"
             else -> null
         }
         var getItemMethod = if (adapterClazzName != null) {
