@@ -2,6 +2,7 @@ package com.lu.wxmask.plugin.part
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.drawable.Drawable
 import android.os.Handler
 import android.os.Looper
 import android.view.View
@@ -36,6 +37,11 @@ class HideMainUIListPluginPart : IPlugin {
         val nameViewMap = WeakHashMap<View, CharSequence>()
         val msgViewMap = WeakHashMap<View, CharSequence>()
         val unreadViewMap = WeakHashMap<View, Boolean>()
+        
+        // 新增：用于缓存原始视图属性，防止复用污染
+        val originalPaddingMap = WeakHashMap<View, IntArray>()
+        val originalBgMap = WeakHashMap<View, Drawable?>()
+        
         var isInterceptorHooked = false
         private val mainHandler = Handler(Looper.getMainLooper())
     }
@@ -77,9 +83,6 @@ class HideMainUIListPluginPart : IPlugin {
         }
     }
 
-    // =====================================================================
-    // 【核心黑科技】：强化拦截器池，拦截更多的 setText 重载方法
-    // =====================================================================
     private fun hookUIInterceptors(context: Context) {
         val clazzNoMeasuredTextView = ClazzN.from("com.tencent.mm.ui.base.NoMeasuredTextView", context.classLoader)
         if (clazzNoMeasuredTextView != null) {
@@ -92,7 +95,6 @@ class HideMainUIListPluginPart : IPlugin {
             })
         }
         
-        // 补充拦截纯文本方法，防止冷启动漏网
         XposedHelpers2.findAndHookMethod(TextView::class.java, "setText", CharSequence::class.java, object : XC_MethodHook2() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val view = param.thisObject as View
@@ -247,7 +249,6 @@ class HideMainUIListPluginPart : IPlugin {
         
         XposedHelpers2.hookMethod(getViewMethod, object : XC_MethodHook2() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                // 不再进行 View 的空置替换，完美保留微信的 ViewHolder 缓存，从根源断绝“分身克隆”
                 val convertView = param.args[1] as? View
                 if (convertView != null) cleanRecycledViewHooks(convertView)
 
@@ -272,14 +273,20 @@ class HideMainUIListPluginPart : IPlugin {
                 val adapter: ListAdapter = param.thisObject as ListAdapter
                 val position: Int = (param.args[0] as? Int?) ?: return
                 val itemData: Any = adapter.getItem(position) ?: return
-                val itemView: View = param.result as? View ?: return 
-
+                
                 val realWxid = param.getObjectExtra("real_wxid") as? String
 
-                // ===== 【修复分身核心】复用对象完美恢复逻辑 =====
+                // ===== 最高优先级：无条件恢复底层数据的真实 ID =====
+                if (realWxid != null) {
+                    XposedHelpers2.setObjectField(itemData, "field_username", realWxid)
+                }
+
+                if (param.hasThrowable()) return
+                val itemView: View = param.result as? View ?: return 
+
+                // ===== 处理非隐藏对象（普通好友或被复用的 View） =====
                 if (realWxid == null) {
                     val lp = itemView.layoutParams
-                    // 如果这个 View 之前被我们缩放过，必须拉伸回原样，否则普通好友会被隐藏！
                     if (lp != null && (lp.height == 0 || lp.width == 0)) {
                         itemView.visibility = View.VISIBLE
                         lp.height = AbsListView.LayoutParams.WRAP_CONTENT
@@ -290,16 +297,30 @@ class HideMainUIListPluginPart : IPlugin {
                             for (i in 0 until itemView.childCount) itemView.getChildAt(i).visibility = View.VISIBLE
                         }
                     }
+                    
+                    // 【精细修复】：完美还原被压扁的 UI 属性（Padding 和 背景）
+                    if (originalPaddingMap.containsKey(itemView)) {
+                        val p = originalPaddingMap[itemView]!!
+                        itemView.setPadding(p[0], p[1], p[2], p[3])
+                        originalPaddingMap.remove(itemView)
+                    }
+                    if (originalBgMap.containsKey(itemView)) {
+                        itemView.background = originalBgMap[itemView]
+                        originalBgMap.remove(itemView)
+                    }
+                    
+                    // 彻底清除残留的点击劫持事件
+                    itemView.setOnClickListener(null)
+                    itemView.isClickable = false
+
                     cleanRecycledViewHooks(itemView)
                     return
                 }
 
                 // ================= 处理目标对象 =================
-                XposedHelpers2.setObjectField(itemData, "field_username", realWxid)
                 val maskBean = WXMaskPlugin.getMaskBeamById(realWxid)
                 val isCompletelyHide = maskBean?.mapId == "hide_completely"
 
-                // ===== 【修复完全隐藏】直接压扁原 View，完美无灰线 =====
                 if (isCompletelyHide) {
                     itemView.visibility = View.GONE
                     val hideParams = itemView.layoutParams ?: AbsListView.LayoutParams(-1, -2)
@@ -310,8 +331,20 @@ class HideMainUIListPluginPart : IPlugin {
                     if (itemView is ViewGroup) {
                         for (i in 0 until itemView.childCount) itemView.getChildAt(i).visibility = View.GONE
                     }
+                    
+                    // 【精细修复】：隐藏前缓存原生的 UI 属性
+                    if (!originalPaddingMap.containsKey(itemView)) {
+                        originalPaddingMap[itemView] = intArrayOf(itemView.paddingLeft, itemView.paddingTop, itemView.paddingRight, itemView.paddingBottom)
+                    }
+                    if (!originalBgMap.containsKey(itemView)) {
+                        originalBgMap[itemView] = itemView.background
+                    }
+                    
                     itemView.setBackgroundColor(0x00000000)
                     itemView.setPadding(0, 0, 0, 0)
+                    
+                    itemView.setOnClickListener(null)
+                    itemView.isClickable = false
                     
                     cleanRecycledViewHooks(itemView)
                     return 
@@ -351,7 +384,6 @@ class HideMainUIListPluginPart : IPlugin {
                 val dotViewId = ResUtil.getViewId(small_red)
                 val dotTv: View? = if (dotViewId != 0) itemView.findViewById(dotViewId) else null
 
-                // ===== 【修复冷启动核心】使用 Handler 投递，打断微信异步刷新 =====
                 if (maskBean != null && nameTv != null) {
                     val customName = if (maskBean.tagName.isNullOrBlank() && maskBean.mapId.isNullOrBlank()) {
                         getAutoTarget(realWxid).second
@@ -362,11 +394,9 @@ class HideMainUIListPluginPart : IPlugin {
                     }
                     nameViewMap[nameTv] = customName
                     
-                    // 立即覆盖
                     if (nameTv is TextView) nameTv.text = customName
                     else XposedHelpers2.callMethod<Any?>(nameTv, "setText", customName)
                     
-                    // 冷启动防御：将覆盖任务抛到 UI 主线程的末尾，让微信自己瞎忙活完后，我们再盖上去一次
                     mainHandler.post {
                         if (nameViewMap[nameTv] == customName) {
                             if (nameTv is TextView) nameTv.text = customName
@@ -398,6 +428,7 @@ class HideMainUIListPluginPart : IPlugin {
                     dotTv.visibility = View.INVISIBLE
                 }
 
+                // 注入我们篡改过的点击事件
                 itemView.setOnClickListener {
                     try {
                         val targetId = if (maskBean?.mapId.isNullOrBlank()) getAutoTarget(realWxid).first else maskBean!!.mapId
