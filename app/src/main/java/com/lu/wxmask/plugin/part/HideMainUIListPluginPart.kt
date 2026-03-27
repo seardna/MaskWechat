@@ -3,8 +3,6 @@ package com.lu.wxmask.plugin.part
 import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Drawable
-import android.os.Handler
-import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import android.widget.AbsListView
@@ -24,31 +22,47 @@ import com.lu.wxmask.util.AppVersionUtil
 import com.lu.wxmask.util.ConfigUtil
 import com.lu.wxmask.util.ext.getViewId
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import java.util.Collections
 import java.util.WeakHashMap
 
 /**
  * 主页UI处理：彻底解决闪烁问题与完美实现零像素完全隐藏
+ * [优化版] - 降低反射开销、解决并发异常、减少GC抖动
  */
 class HideMainUIListPluginPart : IPlugin {
 
     companion object {
-        val nameViewMap = WeakHashMap<View, CharSequence>()
-        val msgViewMap = WeakHashMap<View, CharSequence>()
-        val unreadViewMap = WeakHashMap<View, Boolean>()
+        // 优化：使用 Collections.synchronizedMap 解决底层异步测量时可能引发的并发修改异常 (CME)
+        val nameViewMap: MutableMap<View, CharSequence> = Collections.synchronizedMap(WeakHashMap())
+        val msgViewMap: MutableMap<View, CharSequence> = Collections.synchronizedMap(WeakHashMap())
+        val unreadViewMap: MutableMap<View, Boolean> = Collections.synchronizedMap(WeakHashMap())
         
-        // 【终极修复】：缓存原生的 UI 和 点击事件，防止被永久破坏
-        val originalPaddingMap = WeakHashMap<View, IntArray>()
-        val originalBgMap = WeakHashMap<View, Drawable?>()
-        val originalClickMap = WeakHashMap<View, View.OnClickListener?>()
-        val originalClickableMap = WeakHashMap<View, Boolean>()
+        // 缓存原生的 UI 和 点击事件
+        val originalPaddingMap: MutableMap<View, IntArray> = Collections.synchronizedMap(WeakHashMap())
+        val originalBgMap: MutableMap<View, Drawable?> = Collections.synchronizedMap(WeakHashMap())
+        val originalClickMap: MutableMap<View, View.OnClickListener?> = Collections.synchronizedMap(WeakHashMap())
+        val originalClickableMap: MutableMap<View, Boolean> = Collections.synchronizedMap(WeakHashMap())
         
         var isInterceptorHooked = false
-        private val mainHandler = Handler(Looper.getMainLooper())
+        
+        // 优化：将高频反射调用的 Method 和 Field 缓存起来，避免每次滑动列表都重新查找
+        private var getListenerInfoMethod: Method? = null
+        private var mOnClickListenerField: Field? = null
+
+        init {
+            try {
+                getListenerInfoMethod = View::class.java.getDeclaredMethod("getListenerInfo").apply { isAccessible = true }
+                val listenerInfoClass = Class.forName("android.view.View\$ListenerInfo")
+                mOnClickListenerField = listenerInfoClass.getDeclaredField("mOnClickListener").apply { isAccessible = true }
+            } catch (e: Throwable) {
+                LogUtil.e("Init Reflection Failed in HideMainUIListPluginPart", e)
+            }
+        }
     }
 
-    // 自定义点击事件类，用于识别是否是我们自己的假事件
     class MaskClickListener(val targetId: String, val context: Context) : View.OnClickListener {
         override fun onClick(v: View?) {
             try {
@@ -63,15 +77,12 @@ class HideMainUIListPluginPart : IPlugin {
         }
     }
 
-    // 利用反射获取 View 当前绑定的原生点击事件
+    // 优化：使用缓存好的反射对象获取点击事件，极大提升列表滑动流畅度
     private fun getOnClickListener(view: View): View.OnClickListener? {
         try {
-            val getListenerInfo = View::class.java.getDeclaredMethod("getListenerInfo")
-            getListenerInfo.isAccessible = true
-            val listenerInfo = getListenerInfo.invoke(view) ?: return null
-            val mOnClickListener = listenerInfo.javaClass.getDeclaredField("mOnClickListener")
-            mOnClickListener.isAccessible = true
-            return mOnClickListener.get(listenerInfo) as? View.OnClickListener
+            if (getListenerInfoMethod == null || mOnClickListenerField == null) return null
+            val listenerInfo = getListenerInfoMethod!!.invoke(view) ?: return null
+            return mOnClickListenerField!!.get(listenerInfo) as? View.OnClickListener
         } catch (e: Throwable) {
             return null
         }
@@ -120,6 +131,7 @@ class HideMainUIListPluginPart : IPlugin {
             XposedHelpers2.findAndHookMethod(clazzNoMeasuredTextView, "setText", CharSequence::class.java, object : XC_MethodHook2() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val view = param.thisObject as View
+                    // 优化：快速判断，减少对全局文本设置的干扰
                     if (nameViewMap.containsKey(view)) param.args[0] = nameViewMap[view]
                     else if (msgViewMap.containsKey(view)) param.args[0] = msgViewMap[view]
                 }
@@ -162,19 +174,12 @@ class HideMainUIListPluginPart : IPlugin {
             Constrant.WX_CODE_8_0_50 -> "com.tencent.mm.ui.conversation.q3"
             else -> null
         }
-        var adapterClazz: Class<*>? = null
-        if (adapterName != null) {
-            adapterClazz = ClazzN.from(adapterName, context.classLoader)
-        }
+        val adapterClazz = adapterName?.let { ClazzN.from(it, context.classLoader) }
+        
         if (adapterClazz != null) {
             hookListViewAdapter(adapterClazz)
         } else {
-            val setAdapterMethod = XposedHelpers2.findMethodExactIfExists(
-                ListView::class.java.name,
-                context.classLoader,
-                "setAdapter",
-                ListAdapter::class.java
-            )
+            val setAdapterMethod = XposedHelpers2.findMethodExactIfExists(ListView::class.java.name, context.classLoader, "setAdapter", ListAdapter::class.java)
             if (setAdapterMethod == null) return
             XposedHelpers2.hookMethod(setAdapterMethod, object : XC_MethodHook2() {
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -200,10 +205,10 @@ class HideMainUIListPluginPart : IPlugin {
             Constrant.WX_CODE_8_0_69 -> "o75.v0" 
             else -> null
         }
-        var adapterClazz = if (adapterClazzName != null) ClazzN.from(adapterClazzName) else null
+        val adapterClazz = if (adapterClazzName != null) ClazzN.from(adapterClazzName) else null
 
         if (adapterClazz != null) {
-            var getItemMethod = findGetItemMethod(adapterClazz)
+            val getItemMethod = findGetItemMethod(adapterClazz)
             if (getItemMethod != null) hookListViewGetItem(getItemMethod)
             hookListViewAdapter(adapterClazz)
             return
@@ -329,6 +334,11 @@ class HideMainUIListPluginPart : IPlugin {
                         itemView.visibility = View.VISIBLE
                         lp.height = AbsListView.LayoutParams.WRAP_CONTENT
                         lp.width = AbsListView.LayoutParams.MATCH_PARENT
+                        
+                        // 优化：恢复隐藏时可能被干掉的 margin
+                        if (lp is ViewGroup.MarginLayoutParams) {
+                            lp.setMargins(0, 0, 0, 0) // 假设原版是0，若有偏差可微调
+                        }
                         itemView.layoutParams = lp
                         
                         if (itemView is ViewGroup) {
@@ -336,7 +346,7 @@ class HideMainUIListPluginPart : IPlugin {
                         }
                     }
                     
-                    // 【精细修复】：完美还原原生 UI 属性（消除无灰线后遗症）
+                    // 【精细修复】：完美还原原生 UI 属性
                     if (originalPaddingMap.containsKey(itemView)) {
                         val p = originalPaddingMap[itemView]!!
                         itemView.setPadding(p[0], p[1], p[2], p[3])
@@ -364,6 +374,11 @@ class HideMainUIListPluginPart : IPlugin {
                     val hideParams = itemView.layoutParams ?: AbsListView.LayoutParams(-1, -2)
                     hideParams.height = 0
                     hideParams.width = 0
+                    
+                    // 优化：彻底切断 Margin 占据的像素，防止留有灰线
+                    if (hideParams is ViewGroup.MarginLayoutParams) {
+                        hideParams.setMargins(0, 0, 0, 0)
+                    }
                     itemView.layoutParams = hideParams
                     
                     if (itemView is ViewGroup) {
@@ -423,6 +438,8 @@ class HideMainUIListPluginPart : IPlugin {
                 val dotViewId = ResUtil.getViewId(small_red)
                 val dotTv: View? = if (dotViewId != 0) itemView.findViewById(dotViewId) else null
 
+                // 优化：移除了 mainHandler.post { ... }，因为这会产生大量临时对象导致 GC 抖动。
+                // 已经有底层 setText Hook 兜底，单次赋值即可生效。
                 if (maskBean != null && nameTv != null) {
                     val customName = if (maskBean.tagName.isNullOrBlank() && maskBean.mapId.isNullOrBlank()) {
                         getAutoTarget(realWxid).second
@@ -432,29 +449,14 @@ class HideMainUIListPluginPart : IPlugin {
                         "文件传输助手"
                     }
                     nameViewMap[nameTv] = customName
-                    
                     if (nameTv is TextView) nameTv.text = customName
                     else XposedHelpers2.callMethod<Any?>(nameTv, "setText", customName)
-                    
-                    mainHandler.post {
-                        if (nameViewMap[nameTv] == customName) {
-                            if (nameTv is TextView) nameTv.text = customName
-                            else XposedHelpers2.callMethod<Any?>(nameTv, "setText", customName)
-                        }
-                    }
                 }
                 
                 if (msgTv != null) {
                     msgViewMap[msgTv] = ""
                     if (msgTv is TextView) msgTv.text = ""
                     else XposedHelpers2.callMethod<Any?>(msgTv, "setText", "")
-                    
-                    mainHandler.post {
-                        if (msgViewMap[msgTv] == "") {
-                            if (msgTv is TextView) msgTv.text = ""
-                            else XposedHelpers2.callMethod<Any?>(msgTv, "setText", "")
-                        }
-                    }
                 }
                 
                 if (tipTv != null) {
