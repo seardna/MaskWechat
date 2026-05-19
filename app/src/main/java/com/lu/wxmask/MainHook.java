@@ -197,6 +197,7 @@ public class MainHook implements IXposedHookLoadPackage, IXposedHookZygoteInit, 
         }
         LogUtil.i("start init Plugin");
         hasInit = true;
+        LogUtil.i("WeChat Version: " + AppVersionUtil.getSmartVersionName());
         AppUtil.attachContext(context);
 
         if (BuildConfig.APPLICATION_ID.equals(lpparam.packageName)) {
