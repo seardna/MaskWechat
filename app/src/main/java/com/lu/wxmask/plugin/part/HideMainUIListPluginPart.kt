@@ -39,6 +39,7 @@ class HideMainUIListPluginPart : IPlugin {
         Constrant.WX_CODE_8_0_49, Constrant.WX_CODE_8_0_51,  Constrant.WX_CODE_8_0_56 -> "l"
         Constrant.WX_CODE_8_0_50 -> "n"
         Constrant.WX_CODE_8_0_53 -> "m"
+        Constrant.WX_CODE_PLAY_8_0_69 -> "m" // Guessing 'm' based on 8.0.53, will log if fails
         else -> "m"
     }
 
@@ -143,7 +144,24 @@ class HideMainUIListPluginPart : IPlugin {
                             itemData::class.java.classes
                         )
                     }
-                    val chatUser: String = XposedHelpers2.getObjectField(itemData, "field_username") ?: return
+                     val chatUser: String? = try {
+                        XposedHelpers2.getObjectField(itemData, "field_username")
+                    } catch (e: Throwable) {
+                        LogUtil.w("Get field_username fail", e)
+                        // 尝试遍历所有 String 字段，寻找可能的用户名（通常是微信号或群ID）
+                        val fields = itemData::class.java.declaredFields
+                        fields.forEach { f ->
+                            if (f.type == String::class.java) {
+                                f.isAccessible = true
+                                val v = f.get(itemData) as? String
+                                if (v?.contains("@") == true || (v?.length ?: 0) > 10) {
+                                    LogUtil.d("Potential chatUser field: ${f.name} = $v")
+                                }
+                            }
+                        }
+                        null
+                    }
+                    if (chatUser == null) return
                     val itemView: View = param.args[1] as? View ?: return
                     if (WXMaskPlugin.containChatUser(chatUser)) {
                         hideUnReadTipView(itemView, param)
@@ -167,6 +185,7 @@ class HideMainUIListPluginPart : IPlugin {
                         in 0..Constrant.WX_CODE_8_0_22 -> "tipcnt_tv"
                         Constrant.WX_CODE_PLAY_8_0_42 -> "oqu"
                         in Constrant.WX_CODE_8_0_22..Constrant.WX_CODE_8_0_41 -> "kmv"
+                        Constrant.WX_CODE_PLAY_8_0_69 -> "kmv" // Guessing 'kmv', common in recent versions
                         else -> "kmv"
                     }
                     val tipTvId = ResUtil.getViewId(tipTvIdTextID)
@@ -177,6 +196,7 @@ class HideMainUIListPluginPart : IPlugin {
                         in 0..Constrant.WX_CODE_8_0_40 -> "a2f"
                         Constrant.WX_CODE_PLAY_8_0_42 -> "a_w"
                         Constrant.WX_CODE_8_0_41 -> "o_u"
+                        Constrant.WX_CODE_PLAY_8_0_69 -> "o_u" // Guessing 'o_u'
                         else -> "o_u"
                     }
                     val viewId = ResUtil.getViewId(small_red)
@@ -191,6 +211,7 @@ class HideMainUIListPluginPart : IPlugin {
                         in Constrant.WX_CODE_8_0_22..Constrant.WX_CODE_8_0_40 -> "fhs"
                         Constrant.WX_CODE_PLAY_8_0_42 -> "i2_"
                         Constrant.WX_CODE_8_0_41 -> "ht5"
+                        Constrant.WX_CODE_PLAY_8_0_69 -> "ht5" // Guessing 'ht5'
                         else -> "ht5"
                     }
                     val lastMsgViewId = ResUtil.getViewId(msgTvIdName)
